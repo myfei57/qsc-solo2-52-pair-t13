@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from threading import RLock
+from typing import Any, Iterable, Mapping
 
 from ..clock import Clock
 from ..errors import NotDurableError, RecordError, RestoreError, UnknownRecordError
@@ -56,6 +57,7 @@ class RecordRepository:
         self._durable_seq = 0
         self._committed_seq = 0
         self._snapshot_seq = 0
+        self._write_lock = RLock()
         self._load_backend()
 
     @classmethod
@@ -166,10 +168,22 @@ class RecordRepository:
     def publish(self, kind: str, origin: str, generation: int, payload: Mapping[str, Any]) -> Record:
         """Stage, flush and commit one record."""
 
-        record = self.stage(kind, origin, generation, payload)
-        self.flush()
-        self.commit_through(record.seq)
-        return record
+        records = self.publish_all(((kind, origin, generation, payload),))
+        return records[0]
+
+    def publish_all(
+        self, entries: Iterable[tuple[str, str, int, Mapping[str, Any]]]
+    ) -> tuple[Record, ...]:
+        """Stage, flush and commit several records as one atomic batch."""
+
+        records: list[Record] = []
+        with self._write_lock:
+            for kind, origin, generation, payload in entries:
+                records.append(self.stage(kind, origin, generation, payload))
+            if records:
+                self.flush()
+                self.commit_through(records[-1].seq)
+        return tuple(records)
 
     def require_durable(self, seq: int, *, action: str) -> Record:
         """Return a record only when it has reached the durable watermark."""

@@ -42,6 +42,7 @@ class ValidityDefaults:
     baseline_ttl_ticks: int = 32
     confirmation_ttl_ticks: int = 10
     snapshot_ttl_ticks: int = 64
+    authorization_ttl_ticks: int = 16
 
 
 @dataclass(frozen=True, slots=True)

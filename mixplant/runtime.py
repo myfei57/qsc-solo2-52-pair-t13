@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from .agg.service import AggService
+from .authz.service import AUTHORIZATION_KIND, AuthorizationService
 from .audit.service import AuditService
 from .cement.service import CementService
 from .chute.service import ChuteService
@@ -38,6 +39,7 @@ from .service_base import PlantService
 from .statemachine.gate import PreGate
 from .statemachine.machine import SequenceMachine
 from .statemachine.phases import LINE_SEQUENCES
+from .store.records import Record
 from .store.repository import RecordRepository, RestoreReport
 from .versioning.expiry import Validity
 from .versioning.facade import VersionedArtifacts
@@ -110,6 +112,7 @@ class PlantRuntime:
         self.pump = PumpService(self.context, self.machines["delivery"])
         self.sampler = SamplerService(self.context, self.recipes, self.machines["delivery"])
         self.audit = AuditService(self.context, self.machines["batch"], alarms=self.alarms)
+        self.authz = AuthorizationService(self.context)
         self.controller = PlantController(self)
         self.boot_report: RestoreReport | None = None
         self._services: dict[str, PlantService] = {
@@ -123,6 +126,7 @@ class PlantRuntime:
             "pump": self.pump,
             "sampler": self.sampler,
             "audit": self.audit,
+            "authz": self.authz,
         }
         self._wire_bus()
 
@@ -145,6 +149,7 @@ class PlantRuntime:
         self.boot_report = report
         self._restore_id_counters()
         self._adopt_records()
+        self.authz.restore()
         self._hydrate_machines()
         self.store.publish(
             BOOT_KIND,
@@ -175,6 +180,26 @@ class PlantRuntime:
         self.ids.restore("snap", len(self.store.snapshots.load_all()))
         samples = sum(1 for record in self.store.visible() if record.kind == "sampler.record")
         self.ids.restore("sample", samples)
+        authorizations = max(
+            (self._authorization_number(record) for record in self._authorization_records()),
+            default=0,
+        )
+        self.ids.restore("auth", authorizations)
+
+    def _authorization_records(self):
+        return (
+            record
+            for record in self.store.committed_records()
+            if record.kind == AUTHORIZATION_KIND and record.payload.get("auth_id")
+        )
+
+    @staticmethod
+    def _authorization_number(record: Record) -> int:
+        raw = str(record.payload["auth_id"])
+        try:
+            return int(raw.rsplit("-", 1)[-1])
+        except ValueError:
+            return 0
 
     def _adopt_records(self) -> None:
         """Adopt everything the stream still carries."""
@@ -463,6 +488,37 @@ class PlantRuntime:
                 text(payload, "name"), self._detail(payload)
             ),
             "audit.rollup": lambda payload: self.audit.rollup(),
+            "authz.issue": lambda payload: self.authz.issue(
+                ticket_no=text(payload, "ticket_no"),
+                auth_type=text(payload, "type"),
+                ttl_ticks=optional_integer(
+                    payload, "ttl_ticks", self.config.defaults.authorization_ttl_ticks
+                ),
+            ),
+            "authz.redeem": lambda payload: self.authz.redeem(
+                ticket_no=text(payload, "ticket_no"),
+                request_id=text(payload, "request_id"),
+            ),
+            "authz.return": lambda payload: self.authz.return_authorization(
+                auth_id=optional_text(payload, "auth_id", None),
+                ticket_no=optional_text(payload, "ticket_no", None),
+            ),
+            "authz.void": lambda payload: self.authz.void(
+                auth_id=optional_text(payload, "auth_id", None),
+                ticket_no=optional_text(payload, "ticket_no", None),
+                reason=optional_text(payload, "reason", "authorization voided"),
+            ),
+            "authz.get": lambda payload: self.authz.get(
+                auth_id=optional_text(payload, "auth_id", None),
+                ticket_no=optional_text(payload, "ticket_no", None),
+            ),
+            "authz.status": lambda payload: self.authz.status(),
+            "authz.audit": lambda payload: {
+                "entries": self.authz.audit_trail(
+                    auth_id=optional_text(payload, "auth_id", None),
+                    ticket_no=optional_text(payload, "ticket_no", None),
+                )
+            },
             "baseline.publish": lambda payload: self.publish_baseline(
                 text(payload, "name"),
                 number(payload, "value"),

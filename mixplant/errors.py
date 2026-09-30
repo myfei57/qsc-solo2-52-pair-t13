@@ -86,6 +86,13 @@ class DuplicateError(MixPlantError):
     http_status = 409
 
 
+class AuthorizationError(MixPlantError):
+    """An authorization cannot be used in its current state."""
+
+    code = "authorization_error"
+    http_status = 409
+
+
 class RecordError(MixPlantError):
     """The record stream was used in a way its invariants forbid."""
 
