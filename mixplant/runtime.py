@@ -6,6 +6,16 @@ from typing import Any, Callable, Mapping
 
 from .agg.service import AggService
 from .audit.service import AuditService
+from .auth.registry import (
+    EXPIRE_KIND as AUTH_EXPIRE_KIND,
+    REDEEM_KIND as AUTH_REDEEM_KIND,
+    REOPEN_KIND as AUTH_REOPEN_KIND,
+    REVOKE_KIND as AUTH_REVOKE_KIND,
+    TICKET_KIND as AUTH_TICKET_KIND,
+    TicketRegistry,
+)
+from .auth.service import AuthService
+from .auth.ticket import EXPIRED as AUTH_EXPIRED, REDEEMED as AUTH_REDEEMED, REVOKED as AUTH_REVOKED
 from .cement.service import CementService
 from .chute.service import ChuteService
 from .clock import ManualClock
@@ -109,8 +119,10 @@ class PlantRuntime:
         self.chute = ChuteService(self.context, self.recipes, self.machines["mix"])
         self.pump = PumpService(self.context, self.machines["delivery"])
         self.sampler = SamplerService(self.context, self.recipes, self.machines["delivery"])
+        self.auth = AuthService(self.context, self.machines["batch"], registry=TicketRegistry())
         self.audit = AuditService(self.context, self.machines["batch"], alarms=self.alarms)
         self.controller = PlantController(self)
+        self._register_auth_gates()
         self.boot_report: RestoreReport | None = None
         self._services: dict[str, PlantService] = {
             "recipe": self.recipes,
@@ -122,6 +134,7 @@ class PlantRuntime:
             "chute": self.chute,
             "pump": self.pump,
             "sampler": self.sampler,
+            "auth": self.auth,
             "audit": self.audit,
         }
         self._wire_bus()
@@ -136,6 +149,31 @@ class PlantRuntime:
         self.bus.subscribe(ALARM, self.alarms)
         self.bus.subscribe(ALARM, self.audit.handle_alarm)
         self.bus.subscribe_all(self.audit_subscriber)
+
+    def _register_auth_gates(self) -> None:
+        """Bind every gateable plant command to the action a ticket names.
+
+        A redeemed ticket opens exactly the gate named by its ``action``.
+        The gate callable dispatches the real command, so the door cannot
+        move unless a live ticket was consumed in the same decision.
+        """
+
+        gates = {
+            "chute.open": lambda _: self.chute.open_door(),
+            "chute.close": lambda _: self.chute.close_door(),
+            "chute.load": lambda payload: self.chute.load(
+                truck_id=text(payload, "truck_id"), volume_m3=number(payload, "volume_m3")
+            ),
+            "cement.open_gate": lambda payload: self.cement.open_gate(
+                silo=text(payload, "silo"), target_kg=number(payload, "target_kg")
+            ),
+            "water.open_valve": lambda payload: self.water.open_valve(
+                target_l=number(payload, "target_l")
+            ),
+            "pump.start": lambda _: self.pump.start(),
+        }
+        for action, gate in gates.items():
+            self.auth.register_gate(action, gate)
 
     def bootstrap(self) -> dict[str, Any]:
         """Rebuild every derived artifact from the stored stream."""
@@ -175,6 +213,9 @@ class PlantRuntime:
         self.ids.restore("snap", len(self.store.snapshots.load_all()))
         samples = sum(1 for record in self.store.visible() if record.kind == "sampler.record")
         self.ids.restore("sample", samples)
+        self.ids.restore(
+            "auth", sum(1 for record in self.store.visible() if record.kind == AUTH_TICKET_KIND)
+        )
 
     def _adopt_records(self) -> None:
         """Adopt everything the stream still carries."""
@@ -228,6 +269,29 @@ class PlantRuntime:
                     1,
                     validity=Validity.never(record.tick),
                 )
+            elif record.kind == AUTH_TICKET_KIND:
+                self.auth.adopt_issued(record.payload)
+            elif record.kind == AUTH_REDEEM_KIND:
+                self.auth.adopt_redeemed(
+                    str(record.payload["ticket_id"]),
+                    request_id=(
+                        None
+                        if record.payload.get("request_id") is None
+                        else str(record.payload["request_id"])
+                    ),
+                )
+            elif record.kind == AUTH_EXPIRE_KIND:
+                self.auth.adopt_expired(str(record.payload["ticket_id"]))
+            elif record.kind == AUTH_REVOKE_KIND:
+                self.auth.adopt_revoked(
+                    str(record.payload["ticket_id"]),
+                    reason=(None if record.payload.get("reason") is None else str(record.payload["reason"])),
+                )
+            elif record.kind == AUTH_REOPEN_KIND:
+                self.auth.tickets.link_replacement(
+                    str(record.payload["ticket_id"]),
+                    replacement_id=str(record.payload["replacement_id"]),
+                )
         self.moist.sync(corrections)
 
     def _hydrate_machines(self) -> None:
@@ -276,6 +340,7 @@ class PlantRuntime:
                 for line, machine in self.machines.items()
             },
             versioned=self.versions.describe(now),
+            authorizations=self.auth.describe(now),
             thresholds=self.thresholds.describe(),
             interlocks={
                 "actions": list(self.engine.actions()),
@@ -370,11 +435,36 @@ class PlantRuntime:
         }
 
     def advance_ticks(self, ticks: int = 1) -> int:
-        """Move the deterministic clock forward and record where it went."""
+        """Move the deterministic clock forward and record where it went.
+
+        Expired tickets are swept in the same tick (real time expiry rule):
+        a window that just closed is cleared before any later command reads
+        it.  Redemption also judges expiry on the spot, so the sweep is the
+        clean up pass rather than the safety mechanism.
+        """
 
         moved = self.clock.advance(ticks)
         self.store.publish(CLOCK_KIND, "console", 0, {"active": True, "tick": moved})
+        self.auth.sweep()
         return moved
+
+    def _issue_authorization(
+        self,
+        action: str,
+        *,
+        reuse_policy: str,
+        ttl_ticks: int | None,
+    ) -> dict[str, Any]:
+        return self.auth.issue(action, reuse_policy=reuse_policy, ttl_ticks=ttl_ticks)
+
+    def _redeem_authorization(
+        self,
+        ticket_id: str,
+        *,
+        request_id: str | None,
+        gate_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self.auth.redeem(ticket_id, request_id=request_id, gate_payload=gate_payload)
 
     def commands(self) -> dict[str, Callable[[Mapping[str, Any]], Any]]:
         """Return the command surface the console exposes."""
@@ -479,6 +569,31 @@ class PlantRuntime:
             "store.rollback": lambda payload: self.rollback(
                 integer(payload, "seq"), reason=optional_text(payload, "reason", "operator rollback")
             ),
+            "auth.issue": lambda payload: self._issue_authorization(
+                text(payload, "action"),
+                reuse_policy=optional_text(payload, "reuse_policy", "strict"),
+                ttl_ticks=optional_integer(
+                    payload, "ttl_ticks", self.config.defaults.authorization_ttl_ticks
+                ),
+            ),
+            "auth.redeem": lambda payload: self._redeem_authorization(
+                text(payload, "ticket_id"),
+                request_id=optional_text(payload, "request_id", None),
+                gate_payload=dict(payload.get("payload") or {}),
+            ),
+            "auth.revoke": lambda payload: self.auth.revoke(
+                text(payload, "ticket_id"),
+                reason=optional_text(payload, "reason", "returned"),
+            ),
+            "auth.reopen": lambda payload: self.auth.reopen(
+                text(payload, "ticket_id"),
+                ttl_ticks=optional_integer(
+                    payload, "ttl_ticks", self.config.defaults.authorization_ttl_ticks
+                ),
+                reason=optional_text(payload, "reason", "void and reopen"),
+            ),
+            "auth.expire": lambda payload: self.auth.expire_ticket(text(payload, "ticket_id")),
+            "auth.sweep": lambda payload: self.auth.sweep(),
             "clock.advance": lambda payload: {"tick": self.advance_ticks(integer(payload, "ticks"))},
         }
 

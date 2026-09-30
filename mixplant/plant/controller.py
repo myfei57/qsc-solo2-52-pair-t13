@@ -8,6 +8,7 @@ from .batch import batch_view
 from .diagnostics import run_diagnostics
 from .manifest import describe_manifest
 from .mix import mix_view
+from .authorizations import authorization_view
 from .recipe import recipe_view
 from .truck import truck_view
 
@@ -44,6 +45,9 @@ class PlantController:
             pump_service=self.runtime.pump,
             sampler_service=self.runtime.sampler,
         )
+
+    def authorization_view(self) -> dict[str, Any]:
+        return authorization_view(self.runtime.auth)
 
     def alarm_view(self) -> dict[str, Any]:
         return {

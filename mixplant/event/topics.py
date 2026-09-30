@@ -15,6 +15,7 @@ RECIPE = "recipe"
 MOIST = "moist"
 STORE = "store"
 ALARM = "alarm"
+AUTH = "auth"
 
 TOPICS: tuple[str, ...] = (
     AGG,
@@ -28,6 +29,7 @@ TOPICS: tuple[str, ...] = (
     MOIST,
     STORE,
     ALARM,
+    AUTH,
 )
 
 _ORIGIN_TOPICS = {
@@ -42,6 +44,7 @@ _ORIGIN_TOPICS = {
     "moist": MOIST,
     "store": STORE,
     "console": STORE,
+    "auth": AUTH,
 }
 
 

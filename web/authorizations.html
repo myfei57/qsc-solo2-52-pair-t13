@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authorizations</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #f5f6f8; color: #1c1f24; }
+    table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 1rem; }
+    th, td { border: 1px solid #d7dbe0; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.85rem; }
+    form { background: #fff; padding: 1rem; border: 1px solid #d7dbe0; margin-bottom: 1rem; display: inline-block; }
+    input, select, button { padding: 0.35rem 0.5rem; margin: 0.2rem; }
+    nav a { margin-right: 0.8rem; }
+    .redeemed { color: #1a7f37; } .expired, .revoked { color: #b42318; } .issued { color: #175cd3; }
+  </style>
+</head>
+<body>
+  <nav><a href="/pages/recipe">recipe</a><a href="/pages/batch">batch</a><a href="/pages/discharge">discharge</a><a href="/pages/authorizations">authorizations</a><a href="/pages/alarms">alarms</a></nav>
+  <h1>Single use authorizations</h1>
+  <p>Counts — issued: <b id="c-issued"></b>, redeemed: <b id="c-redeemed"></b>, expired: <b id="c-expired"></b>, revoked: <b id="c-revoked"></b></p>
+
+  <form id="issue">
+    action <input name="action" value="chute.open" list="actions">
+    <datalist id="actions"></datalist>
+    type
+    <select name="reuse_policy"><option value="strict">strict (reuse refused)</option><option value="reopenable">reopenable (void + new)</option></select>
+    ttl <input name="ttl_ticks" value="8" size="4">
+    <button type="submit">issue</button>
+  </form>
+  <form id="redeem">
+    ticket <input name="ticket_id" placeholder="auth-000001">
+    request id <input name="request_id" placeholder="optional idempotency key">
+    <button type="submit">redeem (open gate)</button>
+  </form>
+  <form id="revoke">
+    ticket <input name="ticket_id" placeholder="auth-000001">
+    reason <input name="reason" value="returned">
+    <button type="submit">revoke / return</button>
+  </form>
+  <form id="reopen">
+    ticket <input name="ticket_id" placeholder="auth-000001">
+    <button type="submit">void and reopen</button>
+  </form>
+  <form id="sweep"><button type="submit">sweep expired now</button></form>
+
+  <table id="tickets">
+    <thead><tr><th>ticket</th><th>action</th><th>type</th><th>status</th><th>valid until</th><th>redeemed</th><th>replacement</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script id="auth-state" type="application/json"><!--STATE--></script>
+  <script>
+    const state = JSON.parse(document.getElementById('auth-state').textContent || '{}');
+    const counts = state.counts || {};
+    for (const s of ['issued','redeemed','expired','revoked']) {
+      document.getElementById('c-' + s).textContent = counts[s] ?? 0;
+    }
+    const actions = state.gate_actions || [];
+    const dataList = document.getElementById('actions');
+    for (const a of actions) {
+      const opt = document.createElement('option'); opt.value = a; dataList.appendChild(opt);
+    }
+    const tbody = document.querySelector('#tickets tbody');
+    for (const t of (state.tickets || [])) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${t.ticket_id}</td><td>${t.action}</td><td>${t.reuse_policy}</td>` +
+        `<td class="${t.status}">${t.status}</td><td>${t.validity.valid_until ?? '—'}</td>` +
+        `<td>${t.redeemed_tick ?? '—'}</td><td>${t.replacement_id ?? '—'}</td>`;
+      tbody.appendChild(tr);
+    }
+    async function post(path, form) {
+      const entries = form ? Object.fromEntries(new FormData(form).entries()) : {};
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entries) });
+      return response.json();
+    }
+    const routes = { issue: '/api/auth/issue', redeem: '/api/auth/redeem', revoke: '/api/auth/revoke', reopen: '/api/auth/reopen', sweep: '/api/auth/sweep' };
+    for (const [id, path] of Object.entries(routes)) {
+      document.getElementById(id).addEventListener('submit', async (event) => {
+        event.preventDefault();
+        console.log(await post(path, event.target));
+        location.reload();
+      });
+    }
+  </script>
+</body>
+</html>

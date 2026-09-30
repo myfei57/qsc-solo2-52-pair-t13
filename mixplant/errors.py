@@ -79,6 +79,34 @@ class BelowLimitError(OverLimitError):
     code = "below_limit"
 
 
+class AuthorizationExpiredError(MixPlantError):
+    """An authorization ticket is past its validity window."""
+
+    code = "auth_expired"
+    http_status = 409
+
+
+class AuthorizationConsumedError(MixPlantError):
+    """An authorization ticket was already redeemed or revoked."""
+
+    code = "auth_consumed"
+    http_status = 409
+
+
+class AuthorizationReuseRejectedError(MixPlantError):
+    """A strict ticket was presented again and reuse is forbidden."""
+
+    code = "auth_reuse_rejected"
+    http_status = 409
+
+
+class AuthorizationRequiredError(MixPlantError):
+    """A gated action was attempted without a valid authorization."""
+
+    code = "auth_required"
+    http_status = 409
+
+
 class DuplicateError(MixPlantError):
     """An identity that must stay unique was reused."""
 
